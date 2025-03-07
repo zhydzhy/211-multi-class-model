@@ -1,0 +1,11 @@
+# 忽略所有文件
+*
+
+# 但允许上传所有 Python 文件
+!*.py
+
+# 允许上传 .gitignore 自己 (防止被忽略)
+!.gitignore
+
+# 允许上传 README 文件 (可选)
+!README.md
