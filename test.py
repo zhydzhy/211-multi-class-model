@@ -17,6 +17,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 with open('instances_train2017.json', 'r') as file:
     coco_data = json.load(file)
+with open('instances_val2017.json', 'r') as file:
+    coco_data_val = json.load(file)
 
 # for top_key in coco_data:
 #     first_level_data = coco_data[top_key]
@@ -70,6 +72,10 @@ for ann in coco_data["annotations"]:
 NUM_CLASSES = 90
 image_labels = {}
 
+image_category_val = defaultdict(list)
+for ann in coco_data_val["annotations"]:
+    image_category_val[ann["image_id"]].append(ann["category_id"])
+NUM_CLASSES = 90
 
 def get_label_vector(image_id):
     """
@@ -80,7 +86,24 @@ def get_label_vector(image_id):
 
     categories = image_category[image_id]
 
-    label_vector = torch.zeros(NUM_CLASSES, dtype=torch.float32)  # 使用 torch.Tensor 替代 np.zeros
+    label_vector = torch.zeros(NUM_CLASSES, dtype=torch.float32)
+    for cat_id in categories:
+        if 1 <= cat_id <= NUM_CLASSES:
+            label_vector[cat_id - 1] = 1
+    image_labels[image_id] = label_vector
+    
+    return label_vector
+
+def get_val_label_vector(image_id):
+    """
+    Get the label vector for the given image ID.
+    :param image_id: int, the ID of the image
+    :return: np.ndarray, a vector indicating the categories for this image
+    """
+
+    categories = image_category_val[image_id]
+
+    label_vector = torch.zeros(NUM_CLASSES, dtype=torch.float32)
 
     for cat_id in categories:
         if 1 <= cat_id <= NUM_CLASSES:
@@ -104,7 +127,7 @@ train_data = datasets.CocoDetection(
     transform = transform
 )
 num_samples = len(train_data)
-num_subset = int(num_samples * 0.05)
+num_subset = int(num_samples *1)
 subset_indices = list(range(num_subset))  # 前 10% 的索引
 train_subset = Subset(train_data, subset_indices)
 
@@ -118,7 +141,7 @@ val_data = datasets.CocoDetection(
 )
 
 num_val_samples = len(val_data)
-num_val_subset = int(num_val_samples * 0.1)
+num_val_subset = int(num_val_samples * 1)
 val_subset_indices = list(range(num_val_subset))  # 前 10% 的索引
 val_subset = Subset(val_data, val_subset_indices)
 
@@ -132,7 +155,7 @@ def collate_fn(batch):
 
 train_loader = DataLoader(
     train_subset,
-    batch_size=4,
+    batch_size=128,
     shuffle=True,
     pin_memory=True,
     collate_fn=collate_fn
@@ -140,7 +163,7 @@ train_loader = DataLoader(
 
 val_loader = DataLoader(
     val_subset,
-    batch_size=4,
+    batch_size=128,
     shuffle=False,
     pin_memory=True,
     collate_fn=collate_fn
@@ -179,9 +202,8 @@ def evaluate_model(model, data_loader, device):
             batch_labels = []
 
             for t in targets:
-                print(t)
                 if t is not None and isinstance(t, list) and len(t) > 0 and isinstance(t[0], dict):
-                    label = get_label_vector(t[0]["image_id"])
+                    label = get_val_label_vector(t[0]["image_id"])
                     # print(label)
                     batch_labels.append(label)
                 else:
@@ -201,8 +223,8 @@ def evaluate_model(model, data_loader, device):
     # print(all_labels[0])
     all_preds = torch.cat(all_preds, dim=0)
     all_labels = torch.cat(all_labels, dim=0)
-    print(all_preds[0])
-    print(all_labels[0])
+    # print(all_preds[0])
+    # print(all_labels[0])
     # precision = precision_score(all_labels.flatten(), all_preds.flatten(),average='micro', zero_division=0)
     # recall = recall_score(all_labels.flatten(), all_preds.flatten(), average='micro',zero_division=0)
     # f1 = f1_score(all_labels.flatten(), all_preds.flatten(), average='micro',zero_division=0)
@@ -222,39 +244,36 @@ def evaluate_model(model, data_loader, device):
     avg_loss = total_loss / total_samples
 
     return precision, recall, f1, accuracy, avg_loss, hamming_loss1
+8
+num_epochs = 10
+for epoch in range(num_epochs):
+    model.train()
+    total_loss = 0
 
+    for batch_idx, (images, targets) in enumerate(train_loader):
+        batch_labels = []
+        images = images.to(device)
+        for t in targets:
+            if t is not None and isinstance(t, list) and len(t) > 0 and isinstance(t[0], dict):                
+                label = get_label_vector(t[0]["image_id"])
+                batch_labels.append(label)
+            else:
+                default_label = torch.zeros(90, dtype=torch.float32)
+                batch_labels.append(default_label)
 
-precision, recall, f1, subset_accuracy, val_loss,hamming_loss1 = evaluate_model(model, val_loader, device)
-print(f"Validation Precision: {precision:.4f}, Recall: {recall:.4f}, F1: {f1:.4f}, Subset Accuracy: {subset_accuracy:.4f}, Val Loss: {val_loss:.4f}, hamming loss:{hamming_loss1:.4f}")
-# num_epochs = 10
-# for epoch in range(num_epochs):
-#     model.train()
-#     total_loss = 0
+        labels = torch.stack(batch_labels).to(device)
+        optimizer.zero_grad()
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
 
-#     for batch_idx, (images, targets) in enumerate(train_loader):
-#         batch_labels = []
-#         images = images.to(device)
-#         for t in targets:
-#             if t is not None and isinstance(t, list) and len(t) > 0 and isinstance(t[0], dict):                
-#                 label = get_label_vector(t[0]["image_id"])
-#                 batch_labels.append(label)
-#             else:
-#                 default_label = torch.zeros(90, dtype=torch.float32)
-#                 batch_labels.append(default_label)
+        total_loss += loss.item()
+        print(total_loss)
+        if batch_idx % 5== 0:
+            print(f"Epoch [{epoch+1}/{num_epochs}], Step [{batch_idx}/{len(train_loader)}], Loss: {loss.item():.4f}")
+    scheduler.step()        
 
-#         labels = torch.stack(batch_labels).to(device)
-#         optimizer.zero_grad()
-#         outputs = model(images)
-#         loss = criterion(outputs, labels)
-#         loss.backward()
-#         optimizer.step()
-
-#         total_loss += loss.item()
-#         print(total_loss)
-#         if batch_idx % 5== 0:
-#             print(f"Epoch [{epoch+1}/{num_epochs}], Step [{batch_idx}/{len(train_loader)}], Loss: {loss.item():.4f}")
-#     scheduler.step()        
-
-#     precision, recall, f1, subset_accuracy, val_loss,hamming_loss1 = evaluate_model(model, val_loader, device)
-#     print(f"Validation Precision: {precision:.4f}, Recall: {recall:.4f}, F1: {f1:.4f}, Subset Accuracy: {subset_accuracy:.4f}, Val Loss: {val_loss:.4f}, hamming loss:{hamming_loss1:.4f}")
-#     print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {total_loss / len(train_loader):.4f}")
+    precision, recall, f1, subset_accuracy, val_loss,hamming_loss1 = evaluate_model(model, val_loader, device)
+    print(f"Validation Precision: {precision:.4f}, Recall: {recall:.4f}, F1: {f1:.4f}, Subset Accuracy: {subset_accuracy:.4f}, Val Loss: {val_loss:.4f}, hamming loss:{hamming_loss1:.4f}")
+    print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {total_loss / len(train_loader):.4f}")
